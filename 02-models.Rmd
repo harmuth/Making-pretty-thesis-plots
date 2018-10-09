@@ -1,0 +1,809 @@
+
+```{r setopts, echo = F, warning=F, message=F}
+knitr::opts_chunk$set(fig.pos = 'H',
+                      warning = F,
+                      echo = F,
+                      out.extra = '',
+                      message = F)
+require(ggplot2)
+require(gridExtra)
+require(kableExtra)
+library(extrafont)
+require(grid)
+require(Hmisc)
+loadfonts(device ="win")
+
+theme_set(theme_minimal(base_size = 10, base_family ="CM Roman"))
+topfont <- gpar(fontfamily = windowsFonts("CM Roman"))
+
+```
+
+
+# Models
+In non-life insurance generalized linear models (GLM) are the "go to" class of models for modeling the risk premium. There exist two ways of doing this. We either estimate the mean *claim severity* (claim size) and claim frequency, which are then multiplied to obtain an estimate for the risk premium, or estimate the risk premium directly. The claim severity is usually modeled by a gamma linear model with a log-link function, and the claim frequency is usually modeled by a Poisson linear model with a log-link function. Under these (gamma and Poisson) models the risk premium model is a compound Poisson-gamma model. The Tweedie distribution is a distribution which is a reparameterization of the compound Poisson-gamma distribution and a member of the exponential dispersion family, which means that the distribution fits in the GLM setup. This property makes the Tweedie distribution a popular choice of distribution when modeling the risk premium as it allows us to estimate the risk without separately estimating severity and frequency.
+
+## Tweedie Model
+We say that $X$ belongs to an exponential family when its density is on the form
+
+$$
+f_X(x,\theta) = \exp\left(\sum_{i=1}^k\eta_i(\theta)T_i(x)-A(\theta)+c(x)\right)1_C(x),
+$$
+
+where $T_i$ and $\eta_i$ are functions, $\theta=(\theta_1,\dots,\theta_p)$ is a $p$-dimensional parameter vector and the domain $C$ is independent of the $\theta$. A special case of the exponential family is the dispersed exponential distributions. $X$ is a dispersed exponential distribution if $X$ has density w.r.t. a measure $\nu$ given by 
+
+$$
+f_X(x,\theta,\phi) = a(x,\phi)\exp\left(\frac{x\theta-A(\theta)}\phi\right)1_C(x),
+$$
+where $C\subset \mathbb R$ is independent of $\theta$ and $\phi$, which are model parameters. We assume $A$ to be twice continuously differentiable and $A'$ to be a bijective function. The distribution is then uniquely determined by the function $A(\theta)$ and dispersion parameter $\phi$ [@josteinnoter]. We say $X\sim DE(A(\theta),\phi)$. We have that
+
+$$
+\mathbb E[X]\equiv \mu = A'(\theta),\,\text{Var}(X) \equiv \sigma^2=\phi A''(\theta).
+$$
+With $\tau(\theta) = A'(\theta)$ we have $\theta=\tau^{-1}(\mu)$. Similar with $V(\mu)=A''(\tau^{-1}(\mu))$ we have that 
+
+$$
+\sigma^2=\phi V(\mu).
+$$
+
+We then have the Tweedie distribution which is a dispersed exponential distribution specified by
+
+$$
+V(\mu)=a\mu^\rho.
+$$
+In our use of the Tweedie distribution, we will only consider versions with $a=1$. We then have
+
+$$
+\theta=\left\{
+                \begin{array}{ll}
+                  \log\mu,\quad&p=1,\\
+                  \frac {1}{1-\rho}\mu^{1-\rho},&\rho\neq1.
+                \end{array}
+              \right.
+$$
+From the above equation we can invert for $\mu$ to obtain
+
+$$
+\mu = A'(\theta) = \left\{
+                \begin{array}{ll}
+                  e^{\theta},\quad&p=1,\\
+                  ((1-\rho)\theta)^{\frac1{1-\rho}},&\rho\neq1.
+                \end{array}
+              \right.
+$$
+
+Integrating $A'(\theta)$ gives
+
+$$
+A(\theta)=\left\{
+                \begin{array}{ll}
+                  e^{\theta},\quad&\rho=1,\\
+                  {-\log(-\theta)},&\rho=2,\\
+                  \frac{((1-\rho)\theta)^{\frac{2-\rho}{1-\rho}}}{2-\rho},&\rho\notin \{1,2\}.
+                \end{array}
+              \right.
+$$
+Substituting these equations into the density we obtain
+
+$$
+\log f_X(x,\mu,\phi,\rho) = \frac 1\phi\left(x\frac{\mu^{1-\rho}}{1-\rho}-\frac{\mu^{2-\rho}}{2-\rho}\right) +  \log a(x,\phi,\rho)
+$$
+
+for $1<\rho<2$. In the special case of $\rho=1$ the distribution coincides with the Poisson and for $\rho=2$ the distribution coincides with the gamma distribution.
+
+
+In the GLM framework for the Tweedie distribution, we assume that $X_1,\dots, X_n$ are independent with $X_i$ having density 
+
+
+$$
+f_{X_i}(x,\mu_i,\phi,\rho) = \exp\left(\frac 1\phi\left(x\frac{\mu_i^{1-\rho}}{1-\rho}-\frac{\mu_i^{2-\rho}}{2-\rho}\right)\right)a(x,\phi,\rho),
+$$
+
+where $1<\rho<2$. It is then assumed that $log(\mu_i)=\beta'z_i$ where $z_i\in\mathbb R^p$ are the covariates belonging to observation $x_i$ such that $\mu_i=\mathbb E[X_i]$. Given $\rho$ we then use MLE to estimate the parameters $\beta\in\mathbb R^p$. 
+
+The currently used risk premium models in Tryg A/S are Tweedie linear models for all but one product.
+
+In this chapter, we will go through different models and how we can use them with the Tweedie distribution. With boosting we can either train a lot of weak learners as GLMs or loosen the assumption of a linear predictor in the GLM framework and replace it with boosted regression trees.
+For neural networks, we do a similar modification of the GLM and replace the linear predictor with a neural network to model non-linear relationship.
+
+## General machine learning concepts
+In this section, we will describe different concepts and methods which are fundamental in machine learning.
+
+### Model selection and assessment
+When we have trained a model, we want to know how good it is. To assess the performance of a model we firstly need a measure. For regression problems, such as predicting risk premiums, the (root) mean squared error ((R)MSE) is usually used. That is given a model $\hat f(x)$ and a dataset $X$ consisting of samples $\{(y_1,x_1),\dots,(y_n,x_n)\}$ then the RMSE of the dataset is given by:
+
+$$
+\text{RMSE}(X) = \sqrt{\frac 1n\sum_{i=1}^n(\hat f(x_i)-y_i)^2}
+$$
+
+Now the question of what data to use when assessing the model arises. When we trained the model, we used the dataset $X_{train}$. If we want to be able to say how well the model generalizes, then using the training data to assess model performance is wrong. Consider a dataset with $n$ samples consisting of $(y_i,x_i)$ with $y_i,x_i\in\mathbb R$. If all $x_i$'s are unique then by using an $n-1$ degree polynomial we can fit a model with zero training error. This is, of course, a gross over-fitting and the zero training error is not a good indication of model performance. To be able to say how well our model generalizes to new data, we need a dataset that has never been touched by the learning algorithms. Before we start training, we randomly select a part of data and keep in a "vault". We call this part of the data the test set, and it should only be used to assess the final models' performance. This answers the question of how to assess the final models. However, during the training phase, we might have different models to choose from, this could be between a neural network with a learning rate of 0.1 and the same neural network with a learning rate of 0.01. We cannot use the test set as it should only be used for assessing the final models. If we used the test set for model selection the RMSE estimate based on the test set would be biased, as it is no longer independent of the model. Instead, we need a dataset which mimics the test set.
+
+#### Train/validation/test
+This leads us to the train/validation/test split of data. As the name suggests, the data is divided into a training set, a validation set, and a test set. The training set is used to train the models. The test set is used to assess the model. Then we have the validation set. The purpose of this dataset is to provide an estimate for the generalization error, i.e., what is the error of the model when we apply it to out-of-sample data. We can use the estimates from the different models to select among the models.
+The validation set mimics the test set in the sense that it is not used for training, so it is independent of the individual models. We then use the validation set to calculate the validation error for our different candidate models. These candidate models can be of the same model structure but with different hyperparameters. We then choose the model with the lowest validation error. With a model selected as the final model, we can now pull the test set out of the vault to get an unbiased generalization error.
+In practice, the test set is often being used to choose among a few final models (<10). These models are usually from different frameworks, or they have been trained with different methods. This introduces some bias as we are learning which model performs best on the test data, but the bias is negligible compared to the bias we introduce to the validation set as we tune the models with thousands of hyperparameter combinations.
+
+So by splitting the data into three parts, we can obtain models that generalize well to new data by having a validation set, and get a proper assessment of the model by having a test set. Though one has to remember that the more models that we have to select from based on the validation error, the more biased the validation error becomes. For example, if we train 1000 neural network with different hyperparameter combinations, it is likely that the model we choose, based on validation performance, is biased against the validation set.
+
+#### Cross-validation
+Cross-validation is another method for selecting and assessing models with regards to how well they generalize. Using this method, we can either obtain an estimate of the generalization error or choose the model with the lowest error among a selection of models.
+Which application of cross-validation to use when depends on what problem we want to solve. If our dataset is not sufficiently big such that we can split the data into train and test data and use the test data to obtain a good prediction estimate^[See Section [Train / validation / test] for discussion of what constitutes a good prediction estimate] we would want to use the first application of cross-validation.
+If the data is sufficiently big, we would split the data into training and test and use cross-validation to find the best model among candidate models. The models we are choosing among usually have the same covariates and parameter space, but with different hyperparameters, though it is possible to use cross-validation to choose between models with different subsets of covariates. In the machine learning methods discussed in this thesis, cross-validation is utilized as a hyperparameter tuning method. The most common cross-validation scheme is called $K$-fold cross-validation. Here we randomly partition the dataset into $K$ roughly equal partitions or *folds* as they are known. The cross-validation error with respect to a loss function $L(y,\hat y)$ on a training set $X_{train}$ is then defined by
+
+$$
+\text{CV}(X_{train}) = \frac 1n\sum_{i=1}^nL\left(y_i,f^{\tau(i)}(x_i)\right)
+$$
+where $\tau:\{1,\dots,n\}\mapsto\{1,\dots,K\}$ is the function that maps a sample index to a fold. $f^i(x)$ is the model trained on data excluding the samples in fold $i$.
+
+
+#### Decoupling of performance and objective
+Since we measure how well the model performs by our performance measure, it makes sense that it is the same measure that we optimize during training. However, for example when modeling frequency it is a common assumption that it follows a Poisson distribution. Under this assumption, we would want to minimize the Poisson log-likelihood for the training data. However, in contrast to traditional statistics, we do not assume any distributional properties of our data. We have the idea that the data might follow a particular distribution, but we are only going to use a model trained with the distribution's log-likelihood if it is the model with the best validation performance. We treat the objective function as a hyperparameter. For example, if using the gamma log-likelihood loss our objective function yields lower validation RMSE than the model using a Poisson log-likelihood, then we should not discard the gamma model because the frequency is not assumed gamma distributed.
+
+In the modeling phase, we will treat the objective function as a hyperparameter. In the section about [Deep Tweedie], we introduce a Tweedie model with a neural network as the mean parameter $\mu$. This is essentially using the Tweedie log-likelihood function as our objective function during optimization.
+
+### Bias and variance
+The concepts of bias and variance and the bias-variance trade-off are important to understand in order to produce good models. Assume we want to model $Y$ by covariates $X$ with the relationship $Y=f(X)+\epsilon$, where $\epsilon$ is an error term with mean zero and variance $\sigma^2_\epsilon$. We then want to estimate a function $\hat f$. The expected mean squared error of the model is then
+
+$$
+\mathbb E_{(x,y)\sim D, S\sim D^n, \epsilon \sim E}\left[\left(Y-\hat f_S(x)\right)^2 \right] =\mathbb E\left[\left(Y-\hat f_S(x)\right)^2 \right], 
+$$
+
+where $D$ is the distribution that samples are drawn from and $D^n$ indicates that $n$ samples are drawn. $S$ is the data the model is based on i.e. train data. $E$ is the distribution our error term is drawn from. We can then decompose the above into variance, bias, and irreducible error:
+
+\begin{align*}
+error(x) &= \left(\mathbb E\left[\hat f_S(x)\right]-f(x)\right)^2+\mathbb E\left[\left(\mathbb E\left[\hat f_S(x)\right]-\hat f_S(x)\right)^2 \right] + \sigma^2_\epsilon\\
+ &=\text{Variance}+\text{bias}^2+  \text{Irreducible error}.
+\end{align*}
+
+The interpretation of bias is how well we can train a model with the model framework. The interpretation of variance is how much the model predictions changes around the true value as a function of the randomness in dataset $S$. Generally, models with low flexibility, i.e., the linear model have a high bias, but low variance whereas a complex model such as neural networks have low bias but high variance. 
+
+To increase model performance, we can decrease bias or variance. However, decreasing one usually increases the other. Regularization is an example of decreasing variance, but increasing bias. In general identifying, if a model has a bias or variance problem can be done by comparing training error to validation error. If the validation error is significantly worse than training error, the model has a difficulty generalizing to out-of-sample data. The model is too dependent on the training set and shows high variance. This trade-off between lowering one quantity while increasing the other is called the bias-variance trade-off.ig
+
+There is one unknown quantity which can make identifying bias/variance a problem which is the irreducible error. For example, in image classification the irreducible error is generally really low - almost zero - as there is very little noise. For regression problems, the irreducible error is much harder to assess. This makes it hard to know if the model has a high bias or the irreducible error is so large that we actually cannot reduce bias much more. The same goes for variance as we can have a training RMSE of 10 and validation RMSE of 10.1, but if the irreducible error is 9.99, then the model has a variance problem and not a bias problem.
+
+### Regularization
+Many machine learning models are very complex models that if trained for long enough and in a complex enough setting will be able to memorize the training data. This causes the training error to be 0, but the validation error can be very high. To obtain a better generalization, we can regularize our models. This can be done by introducing a penalty for large parameter estimates, which constrains or shrinks them towards zero. By regularizing we are discouraging the model to learn too complex relationships to avoid the risk of over-fitting.
+Another example of regularizing is stochastic gradient descent algorithms. Here the learning algorithm samples a subset from training data at each iteration. This way the model can never adapt entirely to the training data, as it always sees new samples.
+
+Regularization is used to lower variance, and how much we regularize the model is determined by our hyperparameter optimization.
+
+### Hyperparameter tuning
+Most machine learning methods have hyperparameters which differ from the other model parameters since they are set before the model is trained. These hyperparameters typically specify how fast the learning algorithms learn from data (i.e., learning rate, batch size), model complexity (i.e., number of nodes and hidden layers in neural networks), how much we want to regularize the model (i.e., shrinkage rate) and other parameters which the learning algorithm cannot optimize during training. That is not to say that those are the only types of parameters that can be hyperparameters. For example, if we have a linear model 
+
+$$
+Y = \beta_0 + X\beta +\epsilon
+$$
+
+and fix a $\beta_i$ before fitting the rest of the $\beta$s then $\beta_i$ becomes a hyperparameter.
+
+The value we choose for our hyperparameters may not be the optimal values, and that is where hyperparameter tuning comes into play. The idea of hyperparameter tuning is that for each hyperparameter $\gamma_i$, $i=1...k$ we have a set of candidate parameters $\gamma_{ij}$, $j=1,\dots,l_i$. For each of the $\prod_{i=1}^kl_i$ combinations in the hyperparameter grid, we are going to train the model and choose the combination of hyperparameters which gives us the best model performance. To choose a model with the best generalization, we will measure the model performance either on our validation set or by using cross-validation. The exhaustive search amongst all combinations of candidate parameters is called grid-search. 
+
+If the hyperparameter grid is too large to make it practically feasible to use grid search, another method is to sample (without replacement) from the grid for a feasible number of hyperparameter combinations and carry out the hyperparameter tuning on this reduced grid.
+
+Lastly, we can also do random grid search in which we specify an interval for each hyperparameter. We will randomly select a value in this interval according to a prior distribution. This method is shown to more efficiently optimize hyperparameters by finding better models than standard grid search [@Bergstra12].
+
+## Neural networks
+Neural networks are models, which are inspired by how the brain's neural network functions. The idea of neural networks is not a new idea, but there has been much hype in the last couple of years due to their significant advancements in computer vision and speech. 
+
+Neural networks consist of an input layer connected to a sequence of hidden layers of neurons/nodes which are connected to an output layer with one or more output nodes. The input to the input layer is a feature vector, i.e., an observation. We denote this vector by $a^{[0]}$ with entries $a^{[0]}_i,\; i = 1, \dots, p_0$ and feeds it forward to the neurons in the first hidden layer. Here $p_0$ is the number of input features we use. The neurons of the first layer then make a linear transformation of the input vector, which we denote $z^{[1]}_i,\; i = 1, \dots, p_1$, and then applies an activation function $\sigma(x)$ to the output of the linear transformation. The output from this computation is the vector $a^{[1]}$ with entries $a^{[1]}_i, \; i = 1, \dots, p_1$, which is then fed forward to next hidden layer until we reach the output layer $l$ which outputs our prediction vector $a^{[l]}\equiv\hat{y}$. 
+To formalize this let
+
+\begin{align*}
+z^{[i]}_j = W^{[i]}_j a^{[i-1]}+ b^{[i]}_j,\; i=1,\dots,l,\, j=1,\dots, p_i, \\
+a^{[i]}_j = \sigma(z^{[i]}_j),\; i=1,\dots, l,\, j=1,\dots, p_i.
+\end{align*}
+
+Here $W^{[i]}$ is the $p_{i-1}\times p_i$ dimensional weight matrix for layer $i$ and $W^{[i]}_j$ is the $j$'th row of the matrix.
+These calculations can be vectorized such that
+
+
+\begin{align*}
+z^{[i]} = W^{[i]} a^{[i-1]}+ b^{[i]},\; i=1,\dots, l\\
+a^{[i]} = \sigma(z^{[i]}),\; i=1,\dots, l.
+\end{align*}
+
+
+Here the activation function is applied element-wise. The neural network can, as its name suggest, be represented visually as a network in figure \@ref(fig:networkgraph).
+
+```{r networkgraph, eval=TRUE, fig.cap="A neural network represented as a graph"}
+knitr::include_graphics("nn.png")
+
+```
+
+
+
+
+In training the learning algorithm updates the weight matrices $W^{[i]},\, i=1, \dots, l$ iteratively such that we hopefully see the performance increase. However, how do we update the weights? The basic idea is to calculate the derivative of our loss function with respect to the weights and update the weights by taking a step in the opposite direction. We will go deeper into detail about different gradient descent optimization algorithms later in the section about gradient descent.
+  
+In the above example, we keep the same activation function throughout the entire network. Usually, an appropriate activation function is chosen for the output layer depending on the domain of the target variable $y$ and then one activation function is used for the rest of the network, though using different activation functions for each neuron is completely possible.
+
+### Activation functions
+The activation functions are what makes the neural network able to model non-linear relationships between features and output. Some of the most common activation functions are the sigmoid (and tanh), linear and rectified linear unit (RELU). We will distinguish between activation functions used in the hidden layers and the output layer. We will refer to the activation function used in the output layer as output function.
+
+The sigmoid function is given by
+
+$$
+\sigma(x) = \frac{1}{1+e^{-x}}
+$$
+
+The sigmoid activation function has long been the default activation function for neural networks. A closely related alternative to the sigmoid function is the hyperbolic tangent function, which almost always yields better results. The hyperbolic tangent function is given by
+
+$$
+\tanh(x) = \frac{e^x-e^{-x}}{e^x+e^{-x}}
+$$
+
+The better results come from the fact that the sigmoid function maps into $(0,1)$ and the tanh function maps into $(-1,1)$. So the mean of the activation values of the tanh function will be closer to 0 than the values of the sigmoid function, which speeds up learning [@CourseraAndrewNG].
+
+```{r activation, echo=FALSE, cache=TRUE, fig.cap = "Activation functions. Sigmoid (left), RELU (middle), tanh (right)", fig.asp=1/3}
+
+gridExtra::grid.arrange(
+  ggplot2::ggplot(data.frame(x = c(-5, 5)), ggplot2::aes(x)) + ggplot2::stat_function(fun = function(x){1/(1+exp(-x))}) + ggplot2::ylim(-1,1),
+  ggplot2::ggplot(data.frame(x = c(-1, 1)), ggplot2::aes(x)) + ggplot2::stat_function(fun = function(x){pmax(0,x)})+ ggplot2::ylim(-1,1),
+  ggplot2::ggplot(data.frame(x = c(-5, 5)), ggplot2::aes(x)) + ggplot2::stat_function(fun = function(x){2/(1+exp(-x*2))-1})+ ggplot2::ylim(-1,1)
+  , ncol = 3,
+  top = textGrob("Plot of activation functions",gp = topfont))
+
+```
+
+The rectified linear unit (RELU) function is given by
+
+$$
+g(x) = \max(0,x)
+$$
+
+and is becoming the new default activation function. This is primarily due to the fact that it learns multiple times faster than using the tanh or sigmoid function as activation function [@Imagenet]. Note that the RELU is not differentiable in 0. In practice, this does not concern us since the probability of seeing a value of exactly 0 is very small. In the case that the value is 0, we set it to 1.
+
+Why is it essential to have non-linear activation functions? To illustrate let's take a look at a simple neural network with one hidden layer. Then
+
+
+\begin{align*}
+\hat y = a_2 = g(z_2) &= z_2\alpha + \beta\\
+&=(W^{[2]}a^{[1]}+b^{[2]})\alpha + \beta=(W^{[2]}g(z_1)+b^{[2]})\alpha + \beta\\
+&=(W^{[2]}(z^{[1]}\alpha+\beta)+b^{[2]})\alpha + \beta = W^{[2]}z^{[1]}\alpha^2 + K\\
+&=W^{[2]} (W^{[1]}a^{[0]}+b^{[0]})\alpha^2 +K\\
+&=W^{[2]}W^{[1]}x + K' = W'x+K'
+\end{align*}
+
+Here we see that using a linear activation function the output of the neural network $\hat y$  is linear in the input $x$. Since we want the neural network to model non-linear relationships between input and output, using a linear activation function will not work.
+
+For the output function, the sigmoid function is almost always chosen when modeling binary 0/1 output and linear activation function when making a regression model. Though in our case the exponential function might also serve as an output function since we want positive predictions for all possible targets (risk premium, frequency, and claim size). In the section about neural networks in an insurance context, the idea and intuition behind this output function are discussed.
+
+### Gradient descent
+In this section, we will describe the optimization algorithms used to train a neural network. These methods are gradient descent algorithms, which are iterative algorithms that update the parameters of the neural network by taking a step in the direction of steepest gradient descent. The gradient in question is the gradient of our chosen loss function w.r.t. the weight matrices and biases in our network. If we let $dW^{[i]}$ and $db^{[i]}$ be the gradients of the loss w.r.t. to the corresponding weight matrix or bias vector, then the update is as following
+
+
+\begin{align*}
+W^{[i]} &\rightarrow W^{[i]} - \eta \cdot dW^{[i]},\, i=1,\dots, l\\
+b^{[i]} &\rightarrow b^{[i]} - \eta \cdot db^{[i]},\, i=1,\dots, l
+\end{align*}
+
+
+Here $\eta$ is step-size in the gradient descent direction or *learning rate*, as it is called for neural networks. We treat the learning rate as a hyperparameter when training our model. For now, the learning rate is constant, but we will discuss different learning rate schemes in [Gradient descent derived algorithms].
+
+We calculate the gradient by doing back-propagation. Back-propagation is short for backwards propagation of error. The name comes from the way we calculate the derivatives with respect to the errors. We start with the weights in the output layer and calculate the gradient of the objective function w.r.t the weights in the output layer $l$. We denote this gradient by $dW^{[l]}$. 
+Then we want to calculate the gradient of the objective function w.r.t the weights in layer $l-1$. Instead of calculating it directly, we utilize the structure of the network. We can view the network as a series of composite function with each function corresponding to a layer. To calculate the gradient of a layer $i$, we apply the chain rule to obtain $dW^{[i]}$. Using the chain rule allows us to calculate local gradients from layer to layer. We can then reuse these local gradients in the calculation of $dW^{[i]}$. This allows us to save computation time.
+
+In back-propagation, we use all training samples per gradient descent step. We call this approach batch gradient descent (BGD) since we use the whole training set or *batch*. We call each pass through the entire data an epoch. For large datasets, the gradient computations can be quite heavy even though we have vectorized the algorithm, and we might not be able to fit all data in memory. A feature of batch gradient descent is that the algorithm guarantees convergence to a local minimum [@sparselearning]. This convergence to local minima is not necessarily a useful feature since the algorithm can get stuck in local minima, i.e., the algorithm finds a local minimum and then stops without looking for possible better minima.
+
+A solution to these problems is stochastic gradient descent (SGD). Instead of updating the parameters (weights and biases) using the entire batch, SGD uses one training example per update. Since we only use one sample at a time, the gradient calculated is only an estimate (stochastic approximation, hence the name) of the true gradient calculated in BGD. The calculated gradients and subsequently update of parameters then have a high degree of variance, which causes the training loss not to have guaranteed reduction on each iteration. We are not guaranteed convergence as in BGD, but the stochastic nature of SGD allows the algorithm to leave one local minimum for a hopefully better one. The behavior of jumping around between minima can cause the algorithm to have problems converging. 
+
+Between stochastic and batch gradient descent we have mini-batch gradient descent. This algorithm uses $n$ training samples for each update which utilizes the fast vectorized implementation of back-propagation, while not being hindered by big matrix computations as in BGD. It also reduces the variance of the gradient calculated in SGD while still maintaining the speed advantage over BGD. The name stochastic gradient descent is also used when talking about mini-batch gradient descent, and we will use that name for mini-batch gradient descent everywhere else in the thesis. Usually, the number of samples in the mini-batch $n$ is low compared to the number of training samples.  One major advantage over batch learning is that learning with stochastic gradient descent is usually much faster [@lecun-98].
+
+So far we have kept the weights and biases separate, but to lighten up notation, we will include the biases in the weight matrices and pad our activation vectors for the different layers with a 1-vector such that
+
+$$
+z^{[i]} = \begin{bmatrix} b^{[i]} & W^{[i]} \end{bmatrix} \begin{bmatrix} 1 \\ a^{[i-1]}\end{bmatrix} = 
+W^{[i]} a^{[i-1]}+ b^{[i]},\; i=1,\dots, l
+$$
+
+where $\begin{bmatrix} b^{[i]} & W^{[i]} \end{bmatrix},\; i=1,\dots, l$ are our new weight matrices unless otherwise specified.
+
+
+### Gradient descent derived algorithms
+In this section, we will discuss different optimization algorithms that build on stochastic gradient descent to fix some of its shortcomings. 
+
+Firstly stochastic gradient descent has poor performance when navigating surfaces containing *ravines* [@suttonravine]. A *ravine* is when the slopes of a surface have steep slopes in some directions while having shallow slopes in other directions. 
+
+To show this, let us consider the following example where we use gradient descent on the loss functions
+
+\begin{align*}
+L_1(x) = x_1^2+10x_2^2\\
+L_2(x) = x_1^2+0.9x_2^2
+\end{align*}
+
+Here the surface has a ravine when navigating the $L_1$ loss function. For each loss function, two learning rates were used. A low and steady learning rate for $L_1$ rate  and a steady (same as for $L_1$) and high learning rate for $L_2$ as seen in figure \@ref(fig:ravines). Here we can see that when the surface has a ravine then depending on the learning rate, we either have slow convergence compared to the shallow surface (top right) or oscillating descent (top left). Trying to increase the learning rate much further than the learning rate used in the top left plot will cause the gradient descent on the $L_1$ to diverge. For the loss function $L_2$ with balanced gradients we can see that when using the same learning rate as for the oscillating descent, we have faster convergence. Also, it is possible to achieve a much faster convergence when utilizing that learning between coordinates happens at same speed, i.e., we do not "over-learn" in one direction as in the top left plot.
+
+
+```{r ravines, cache = TRUE, echo = F, warning = F, message = F, fig.cap = "Example of gradient descent. \\textbf{Left top}: Ravine with oscillating descent and steady learning rate. \\textbf{Right top}: Ravine with slow, steady descent and low learning rate. \\textbf{Middle left}: Balanced gradient between coordinates with steady descent (same learning rate as top left). \\textbf{Middle right}: Balanced gradient between coordinates with a fast descent and high learning rate. \\textbf{Bottom}: Learning curves for ten iterations of gradient descent for the different scenarios."}
+require(dplyr)
+require(magrittr)
+require(ellipse)
+require(knitr)
+
+opts_chunk$set(echo = F, warning = F, message = F)
+grad <-  function(x1, x2, ri){
+  return(c(x1, ri * x2))
+}
+
+GD <- function(x1.0, x2.0, n.iter, eta, ri){
+  out <- data.frame(x1 = x1.0, x2 = x2.0)
+  curval = c(x1.0, x2.0)
+  for(i in 1:n.iter){
+    nextval <- curval - eta * grad(curval[1], curval[2], ri)
+    out %<>% bind_rows(data.frame(x1=nextval[1], x2 = nextval[2]))
+    curval <- nextval
+    
+  }
+  
+  
+  return(out)
+}
+
+data2 <- GD(1, 0.08, 10, 0.095,10) %>% mutate(t = row_number(), err = x1^2 + 10 * x2^2,  Line ="Ravine, low learning rate")
+data <- GD(1, 0.08, 10, 0.195,10) %>% mutate(t = row_number(), err = x1^2 + 10 * x2^2,   Line ="Ravine, steady learning rate")
+data1 <- GD(1, 0.8, 10, 0.195,0.9) %>% mutate(t = row_number(), err = x1^2 + 0.9 * x2^2, Line ="Balanced, steady learning rate")
+data3 <- GD(1, 0.8, 10, 0.99,0.9) %>% mutate(t = row_number(), err = x1^2 + 0.9 * x2^2,  Line ="Balanced, high learning rate")
+nlevel = 6
+ellipsed <- data.frame()
+for(i in 1:nlevel){
+  
+  ellipsed %<>% bind_rows((data.frame(level = as.factor(i), ellipse(matrix(diag(2), ncol = 2), scale = c(1,0.1), level = exp(seq(from = log(0.01), 
+                                                                                                                             to = log(0.39),
+                                                                                                                             length.out = nlevel)[i])))))
+  
+  
+}
+
+ellipsed2 <- data.frame()
+for(i in 1:nlevel){
+  
+  ellipsed2 %<>% bind_rows((data.frame(level = as.factor(i), ellipse(matrix(diag(2), ncol = 2), scale = c(1,0.9), level = exp(seq(from = log(0.01), 
+                                                                                                                                 to = log(0.39),
+                                                                                                                                 length.out = nlevel)[i])))))
+  
+  
+}
+gridExtra::grid.arrange(
+ggplot(data) + 
+  geom_path(aes(x1, x2), col = "red") +
+  geom_point(aes(x1, x2), col = "blue", alpha = 0.3) +
+  geom_path(data = ellipsed, aes(x, y, group = level)),
+ggplot(data2) + 
+  geom_path(aes(x1, x2), col = "red") +
+  geom_point(aes(x1, x2), col = "blue", alpha = 0.3) +
+  geom_path(data = ellipsed, aes(x, y, group = level)),
+ggplot(data1) + 
+  geom_path(aes(x1, x2), col = "red") +
+  geom_point(aes(x1, x2), col = "blue", alpha = 0.3) +
+  geom_path(data = ellipsed2, aes(x, y, group = level)),
+ggplot(data3) + 
+  geom_path(aes(x1, x2), col = "red") +
+  geom_point(aes(x1, x2), col = "blue", alpha = 0.3) + 
+  geom_path(data = ellipsed2, aes(x, y, group = level)),
+ggplot(bind_rows(data,data1,data2,data3), aes(t, err, col = Line)) + 
+  geom_line() +
+  ylab("Error") +
+  xlab("Iteration number"),
+  layout_matrix =  rbind(c(1,2),
+                         c(3,4),
+                         c(5,5)
+                        ),
+top = textGrob("Gradient descent example", gp = topfont))
+
+
+
+
+```
+
+#### Momentum
+
+How can solve the problem of navigating ravines when performing gradient descent? One way is to standardize our input data. We will discuss how and why it works in the section about optimization setup and problems. Another way is to alter our gradient descent algorithm by adding momentum. Momentum gives our gradient descent algorithm a sense of general direction by adding the previous update multiplied with a momentum factor:
+
+\begin{align*}
+v^{[i]} &\rightarrow \mu v^{[i]} + \eta \cdot dW^{[i]}\\
+W^{[i]} &\rightarrow W^{[i]} - v^{[i]},\, i=1,\dots, l
+\end{align*}
+
+This introduces a new hyperparameter $\mu$ which controls how much we want to remember from prior updates. Notice that our learning rate $\eta$ can both be applied to the gradient in the update of $v^{[i]}$ as above or in the update of $W^{[i]}$ when multiplied with $v^{[i]}$. Here where the size of the momentum factor $\mu$ will be divided by $\eta$, when $\eta$ is placed in the weight update for a corresponding algorithm.
+
+```{echo = F}
+When using gradient descent with momentum, the update can build up speed and eventually overshoot the minima and need additional updates before coming back down to the minima. An algorithm that tries to solve this is Nesterov Accelerated Gradient (NAG) [@NAG] where we in the update of $v^{[i]}_t$ calculate the gradient at $W^{[i]}_{t-1} - v^{[i]}_{t-1}$ instead of $W^{[i]}_{t-1}$. Here $t$ is the current iteration index. We will use the iteration index on our updates in the future, to not confuse which iteration of the update we are referring to. $W^{[i]}_{t-1} - v^{[i]}_{t-1}$ is our best estimate of the next update before seeing actual data and allows the NAG algorithm to look ahead and respond more quickly to changes in the gradient.
+```
+
+
+#### Adaptive algorithms
+The next extension of the stochastic gradient descent is making the learning rate *adaptive*. This means that we will specify an initial learning rate, but as the training goes on the adaptive algorithm will adapt the learning rate to the data, such that each of the weights in our network will be updated according to their own learning rate. Adagrad is an algorithm that extends the regular SGD to include adaptiveness. The idea behind Adagrad is to perform bigger updates on weights that are not activated frequently, i.e. if an activation $a_\rho^{[i]}=0$ often. When this happens the gradients of the loss function w.r.t to the weights $W^{[i+1]}_{j\rho}$ where $j = 1,\dots , p_i$ will be zero. So if all samples used in the update have $a_\rho^{[i]}=0$ the weights will stay the same i.e. $W^{[i+1]}_{j\rho}=W^{[i]}_{j\rho}$ where $j = 1,\dots , p_i$. In order to learn more from the samples where $a_\rho^{[i]}\neq0$ the Adagrad weight update rule is as follows:
+
+\begin{align*}
+G^{[i]} &\rightarrow G^{[i]} + dW^{[i]}\odot dW^{[i]},\, i=1,\dots, l,\\
+W^{[i]} &\rightarrow W^{[i]} -  \eta \left(G^{[i]}+\epsilon\right)^{\circ (-1/2)} \odot dW^{[i]},\, i=1,\dots, l,
+\end{align*}
+
+where $A \odot B$ is the elementwise multiplication of the matrices $A$ and $B$, and $A^{\circ (-1/2)}$ is the matrix which elements are the squareroot of the elements of $A$. So each element in the matrix $G^{[i]}$ is the sum of squared gradients of the specific weight. $\epsilon$ is included to avoid division with zero and is set to a small value, i.e., $10^{-8}$. Then if the gradient with respect to weight is frequently zero, the relative learning rate will be larger than frequently non-zero inputs. To see how this is useful consider a dataset with sparse features, i.e., one-hot-encoded^[One-hot-encoding is the procedure of turning a categorical feature with $n$ levels into a matrix with $n-1$ binary columns. Each column corresponds to a level of the categorical features.] car manufacturer. If then a particular manufacturer is observed in less than $1\%$ of samples but is a strong predictor for the target, the Adagrad will be able to take a large step in the gradient descent direction whenever we see a sample with that make. One disadvantage of the Adagrad algorithm is that the elements of $G^{[i]}$ only get larger and larger which stagnates learning as the effective learning rates go to zero. The RMSprop algorithm fixes this problem by replacing the update of $G^{[i]}$ an exponential moving average of squared gradients
+
+\begin{align*}
+G^{[i]} &\rightarrow \alpha G^{[i]} + (1-\alpha)dW^{[i]}\odot dW^{[i]},\, i=1,\dots, l,\\
+W^{[i]} &\rightarrow W^{[i]} -  \eta \left(G^{[i]}+\epsilon\right)^{\circ (-1/2)} \odot dW^{[i]},\, i=1,\dots, l.
+\end{align*}
+
+Where the initial $G^{[i]}=dW^{[i]},\, i=1,\dots, l$.
+
+The Adaptive Moment Estimation (Adam) algorithm is a gradient descent derived algorithm that combines the adaptiveness of the RMSprop with the momentum algorithm, such that at each iteration, we will update the weights as follows
+
+\begin{align*}
+v^{[i]} &\rightarrow \beta_1 v^{[i]} + (1-\beta_1) dW^{[i]},\, i=1,\dots, l,\\
+G^{[i]} &\rightarrow \beta_2 G^{[i]} + (1- \beta_2)dW^{[i]}\odot dW^{[i]},\, i=1,\dots, l,\\
+v^{[i]} &\rightarrow \frac{v^{[i]}}{1-\beta_1^t},\\
+G^{[i]} &\rightarrow \frac{G^{[i]}}{1-\beta_2^t},\\
+W^{[i]} &\rightarrow W^{[i]} -  \eta v^{[i]}\odot\left(\left(G^{[i]}\right)^{\circ 1/2}+\epsilon\right)^{\circ -1} ,\, i=1,\dots, l.
+\end{align*}
+
+With initialization $v^{[i]}=G^{[i]}=0$. $t$ is the current iteration index. The second updates of $v^{[i]}$ and $G^{[i]}$ are bias correction terms that correct $v^{[i]}$ and $G^{[i]}$ for being zero initialized such that their expected values are the expected values of $dW^{[i]}$ and $dW^{[i]}\odot dW^{[i]}$ [@Adam]. The creators of the Adam optimizer show that Adam empirically outperforms RMSprop as well as SGD with momentum. The interpretation of the update rule is that we weigh how strong the "learning signal" of the past gradients $v^{[i]}$ is compared to the "variance" of past gradients $G^{[i]}$. So if we are near a minima and the direction changes often the elements of $v^{[i]}$ will become small compared to $G^{[i]}$ and the effective learning rate will decrease.
+
+### Optimization setup and problems
+In this section, we will discuss how to prepare data, initialization of network, and the problems that can occur.
+
+#### Feature standardization
+When we want to implement a neural network we usually standardize our input features. As we saw in the gradient descent example having roughly equal range on the input features sped up learning by allowing higher learning rates. There are different standardization methods such as range standardization where an input feature is scaled such that the maximum value in data for that feature is 1 and minimum is $-1$.
+The other popular method is mean-variance standardization. As the name suggests, we subtract the mean and divide it by the standard deviation. This yields features that have mean 0 and unit variance. An addition to this method is feature clipping. If specific features have long tails, it can be beneficial to clip the feature past a certain value to avoid large changes that cause numerical instabilities. For example, in the data we will use for training, some features have a value of less than $-100$ even after mean-variance standardization. The feature clipping will solve this potential issue.
+
+#### Weight and bias initialization
+When setting a neural network up for optimizing, the weights and biases need to have an initial value. As we have normalized our input features, it is a reasonable assumption that half of the features have positive weights and half of the features have negative weights. This would lead us to initialize the weights and biases to zero. This will not work. If we consider a neural network where we initialize all parameters to zero, then we see that $a_1^{[i]}=a_2^{[i]}= \dots = a_{p_i}^{[i]}$ for $i = 1, \dots,l$. So all activations in a layer will be equal. When we then calculate the gradients to update the parameters, the symmetry of the network makes the update symmetrical as well, such that the activations in all layers always will be equal.
+This corresponds to having one neuron in each layer or just a neural network without hidden layers. The same is the case if we initialize the parameters to a common value.
+To solve this problem, we initialize the parameters randomly.
+This is usually done by drawing the weights from a Gaussian distribution with mean zero and low variance. Since the weights are initialized to random values, the symmetry of the network is broken, and we
+can initialize the biases to zero. The reason we initialize the weights with low variance is that we only want to break the symmetry. If we have a weight that is large (either positive or negative) deep in the network, the derivatives that are propagated backward will cause gradients further back in the network to explode.
+
+In most applications of neural networks, the bias of the output layer is not given much thought since the output is normalized, or we have a binary outcome. In our case, we do not have normalized our output. Initializing the bias to the mean of the output or the log of the mean of the output, depending on the output function, might provide a more stable foundation to learn upon. If we initialize the output bias to 0, the algorithm simultaneously has to learn to differentiate between different risk profiles while also finding the base level of risk. When initializing to the mean, the algorithm only has to learn to differentiate between different risk profiles. In the modeling phase, we will explore which of the output bias initialization method is the best.
+
+
+
+### Regularization
+As neural networks can model complex structures in training data, they are prone to over-fitting. Because of this regularizing, the model is a key part of fitting a neural network. There are different methods to implement regularization into the neural network. As mentioned in the section [Gradient descent] the SGD provides regularization through the randomness in the data we feed the learner. Below two methods of regularization are discussed.
+
+#### Norm regularization
+Norm regularization for neural network consists of penalizing the norm of the weights in the network. The two most used norms are the $L2$ and $L1$ norm. In this thesis, we will use the $L2$ regularization.
+When implementing $L2$ regularization the objective function has an extra term. Let $J(W^{[1]},b^{[1]}, \dots, W^{[l]},b^{[l]})$ be the objective function of a neural network, where $W^{[i]}$ is the matrix containing the weights and $b^{[i]}$ is the vector containing the biases $i$'th layer in the network.
+
+$$
+J(W,b) = \frac 1n \sum_{i=1}^n L(y_i, \hat y_i) +\frac \lambda{2n}\sum_{i=1}^l\left\lVert W^{[i]} \right\rVert_F^2
+$$
+
+where $\left\lVert \cdot \right\rVert_F$ is the Frobenius matrix norm. The Frobenius norm of a real valued matrix $A\in\mathcal R^{n,m}$ is defined as
+
+$$
+\left\lVert A \right\rVert_F = \sqrt{\sum_{i=1}^n\sum_{j=1}^m a_{ij}^2}
+$$
+
+Using the Frobenius matrix norm corresponds to stacking the weight of a layer in a matrix and using the L2-norm, hence the name L2 regularization.
+
+When using a standard gradient descent algorithm such as SGD the weight update, when using $L2$ regularization becomes
+
+\begin{align*}
+W^{[i]} &\rightarrow W^{[i]} - \eta \cdot dW^{[i]}- \frac{\eta\lambda}n W^{[i]},\, i=1,\dots, l,\\
+b^{[i]} &\rightarrow b^{[i]} - \eta \cdot db^{[i]},\, i=1,\dots, l.
+\end{align*}
+
+Notice $n$ is the number of samples in the mini-batch and not in the entire dataset. The L2-regularization is also referred to as weight decay or shrinkage. This comes from the fact that we can write the update for the weights as
+
+$$
+W^{[i]} \rightarrow W^{[i]}\left(1-\frac{\eta\lambda}n\right) - \eta \cdot dW^{[i]},\, i=1,\dots, l.
+$$
+Since $0<\left(1-\frac{\eta\lambda}n\right)<1$ the weights decays/shrinks towards zero at each iteration. The decoupled weight decay and weight update property of L2-regularization is only present when using the (stochastic) gradient descent optimizer.
+
+In general, L2-regularization favors using many inputs a bit over using a few a inputs a lot, since we are penalizing the squared weight. In the context of collinearity of features, the optimizer will then put a small weight on each of the features instead of larger weight on a few. For example, if we have two identical features in our data, then instead of putting all weight on one feature, the L2 regularization favors putting equal weight on the two features. 
+
+In the modeling phase, we will use L2-regularization to obtain better generalization as well as handling the potential issue of collinearity. We will treat the penalty $\lambda$ as a hyperparameter.
+
+#### Dropout
+Dropout is a regularization method introduced in [@Dropout] which "... significantly
+reduces over-fitting and gives major improvements over other regularization methods."^[Quote is taken from the abstract of [@Dropout]]. The dropout technique consists of randomly deactivating nodes in the network at each update with probability $p$ (except for the output node). In figure \@ref(fig:dropoutpaper) we can see how the dropout creates a sub-network of the original neural network.
+
+```{r dropoutpaper, fig.cap = "Figure from Srivastava et al., (2014), visualizing the dropout technique."}
+knitr::include_graphics("dropout.jpeg")
+```
+
+If we have $n$ weights in the network, there are $2^n$ possible sub-networks. So when we apply dropout to a neural network, we are training up to $2^n$ subversions of our network with shared weights. When predicting values, instead of averaging over all sub-networks encountered in training, all nodes are active. The activations of the network are then scaled by $p$ to ensures that the expected output from a node is the same as the actual output when not applying dropout. For example if we consider a node with activation $a$ then expected output from that node, during training, is $\mathbb E[a] = pa + (1-p)0 = pa$. So as the node is not deactivated when predicting values, the activations are adjusted by a factor $p$.
+
+In the modeling phase, we will use dropout as a regularization technique and treat $p$ as a hyperparameter.
+\newpage
+
+#### Early stopping
+Early stopping is a regularization method where we stop training when our validation error stops decreasing. When training a neural network, we have set a number of iterations/epochs to complete before stopping. During training, we will hopefully see the validation error decrease, but at some point (see figure \@ref(fig:earlystoppingviz) left plot), we might start over-fitting our train data. This will cause our generalization performance to decrease and is seen in the validation error increasing. By doing early stopping we will stop training when validation error has not decreased for a number of iterations/epoch. This number is referred to as the *patience*.
+
+```{r earlystoppingviz, fig.cap = "\\textbf{Left}: Example of train and validation error during training. Vertical line marks lowest validation error. \\textbf{Right}: Example of validation error where early stopping will not be a good method. Red vertical line marks early stopping point with a patience of 10 epochs. Vertical black line is first local minima of the validation curve."}
+grid.arrange(qplot(data = data.frame(Epochs=rep(seq(1,100,length.out = 100),2),
+                                              Error=c(sin(seq(3,7,length.out = 100))*2-seq(3,7,length.out = 100),
+                                                      sin(seq(3,7,length.out = 100)/2+3)*2-seq(3,7,length.out = 100)),
+                                              Type = c(rep("validation", 100),rep("train",100))),
+                            Epochs,
+                            Error,
+                            col = Type,
+                            geom = "line") + 
+               geom_vline(xintercept = 56, linetype = 2) +
+               theme(legend.position="top"),
+             qplot(data = data.frame(Epochs=seq(1,300,length.out = 100),
+                                              Error=sin(seq(3,21,length.out = 100))*2-seq(3,21,length.out = 100) +
+                                        (seq(3,21,length.out = 100)>13)*(seq(3,21,length.out = 100)-13)^2/5),
+                            Epochs,
+                            Error,
+                            geom = "line") + 
+               geom_vline(xintercept = 37.242424, linetype = 2) +
+               geom_vline(xintercept = 37.242424 + 10, linetype = 2, col = "red"),
+             ncol = 2,
+             top = textGrob("Plot of training and validation curves", gp = topfont)
+             )
+```
+
+A downside to the early stopping is that we might stop too early. In figure \@ref(fig:earlystoppingviz) we can see an example on the right side, where early stopping provides a worse solution than having no early stopping at all.
+
+### Neural networks in an insurance context
+In the regression setting, we usually have one output neuron, but it is possible to have more than one. In the context of insurance, one might have a single neural network for a product with an output neuron for each coverage. Here the heuristic is that within the same product a customer shares a basic risk profile across coverages which the neural network learns and can utilize to predict risk premiums for all coverages at once.
+
+In the usual GLMs used in insurance, the link function is the logarithm. This causes the predictions to be exponential transformations of the linear predictor. We can also apply this to the neural networks, by using the exponential function as the output function in the neural network. The intuition behind using the exponential function is that the distributions of our targets usually are more evenly distributed on a log-scale compared to linear scale. This could make learning easier/more stable but is to be explored in the analysis phase. To this end, we will include the output function as a hyperparameter.
+
+#### Deep Tweedie
+In the Tweedie linear model we assumed that $\log \mu_i$ was linear in the input features. This does not allow for any interactions between the features unless explicitly specified through feature engineering. To solve this I propose using a neural network $f(x,W,b)$ as the estimator for $\mu$ i.e. $\mu_i= f(x_i,W_1,b_1,\dots,W_l,b_l)\equiv f(x_i,W,b)$. To implement this consider the log-likelihood function for the Tweedie distribution
+
+$$
+l(W,b,\phi,\rho\vert\{y_i,x_i\}) = \sum_{i=1}^n\frac 1\phi\left(y_i\frac{f(x_i,W,b)^{1-\rho}}{1-\rho}-\frac{f(x_i,W,b)^{2-\rho}}{2-\rho}\right) +  \log a(y_i,\phi,\rho).
+$$
+
+We then use the slimmed down version log-likelihood function as our loss function. We discard the $\log a(y_i,\phi,\rho)$ since it is constant. We can also discard the dispersion parameter $\phi$, as it does not influence the update of weight or bias parameters (up to a scaling factor of learning rate). We can only do this since we do not use the log-likelihood loss as a performance measure (see [Decoupling of performance and objective]). To implement this in the Tensorflow, we specify the loss function given a Tweedie variance power $\rho$:
+
+```
+rho <- 1.5 #tweedie variance parameter
+tw.log.loss <- function( y_true, y_pred) {
+  tf$subtract(
+    tf$divide(tf$pow(y_pred,tf$subtract(2,rho)),tf$subtract(2,rho)),
+    tf$multiply(y_true,tf$divide(tf$pow(y_pred,tf$subtract(1,rho)),tf$subtract(1,rho)))
+  )
+}
+```
+
+Since we specify the loss function with Tensorflow operators, the derivatives are automatically calculated. As we are also interested in the bounding cases of Poisson ($\rho=1$) for the frequency model and gamma ($\rho=2$) for claim severity these log-likelihood losses are also introduced.
+
+In the GLM case of the Tweedie distribution, we had a log link function. Depending on which output function we choose for the neural network, we can replicate a similar behavior. This is done by using the exponential function instead of the identity function as output function. In the modeling phase, we will treat the output function as a hyperparameter, in order to learn which of the options is better.
+
+## Gradient Boosting
+In machine learning boosting is an ensemble method, which consists of several weak learners, which together create a strong learner. Opposed to many ensemble techniques (e.g., bagging) the learners in the ensemble are a sequence. The learners that we boost are typically small (<5 deep) regression trees or linear models with a small subset of features as covariates. The basic idea of boosting is that after each iteration, the boosting algorithm corrects the prediction error in the next iteration. An example of how this is carried out is 
+
+1. Fit a weak learner to the training data.
+2. Calculate residuals ($\hat y-y=r$) and fit a new weak learner to $r$.
+3. Update predictions with new predictions from 2. ($\hat y \leftarrow \hat y + \hat r$).
+4. Repeat from step 2. until a convergence criterion is met.
+
+This way, by training a weak learner that is computationally light to train, we can make a model that is not good by itself, but when training a new model on the residuals, we correct the mistakes of our original learner, and iteratively improve the model. So even though we use weak learners, they will form a strong learner when sequentially trying to correct the errors made so far. There are different boosting schemes with, e.g., AdaBoost (Adaptive Boosting) which, similar to the approach described in [Adaptive algorithms], gives different weights to different observations (more weight on observations with the highest error) on each iteration.
+
+The boosting scheme that we will apply to our data is called Gradient Boosting or GBM (short for Gradient Boosting Machine). The Gradient Boosting framework can be applied to any model, but we will focus on regression trees. Gradient Boosting Decision Tree (GBDT) has become a very popular algorithm for modeling in machine learning.
+
+### Regression Trees
+
+Regression trees and tree-based models in general, partition the $n$-dimensional feature space into disjoint $n$-dimensional boxes and assign a value to each of the boxes. If we consider the regression problem with features $x_1, x_2$ and output $Y$ a regression tree divides the 2-dimensional feature space into $m$ regions as seen in figure \@ref(fig:regtree). The model then predicts values $a_i$ for each region $R_i$, such that 
+
+$$
+T(x,\Theta) = \sum_{i=1}^ma_m1_{x\in R_i},
+$$
+
+where $\Theta = \{R_1, \dots, R_m\}$. The values assigned to the $a_i$'s depend on the loss function but is the one that minimizes the loss in region $i$. For (R)MSE the values are assigned as 
+
+$$
+a_i = \frac{\sum_{i=1}^my_i1_{x\in R_i}}{\sum_{i=1}^m1_{x\in R_i}}
+$$
+
+i.e., the mean of output values in each region. 
+
+```{r regtree, fig.cap = "Example of a regression tree used on two features. \\textbf{Left}: Features space of the classification problem divided into $m=2$ regions. \\textbf{Right}: The corresponding tree structure with $\\omega_i$ corresponding to $a_i$. Figure source: http://wiki.bethanycrane.com/non-linear-regression-in-ml"}
+knitr::include_graphics("regtree.png")
+```
+
+So far we have only covered what a regression tree is and not how one grows/trains a tree. 
+Ultimately we want to minimize the loss within this framework of binary splits of features. Searching among all possible binary splits of the feature space is for most applications not computationally feasible. Instead, we build the tree split by split, making the split at the end of each branch that minimizes the loss. This is a *greedy* algorithm since we look through all possible splits at a given time. To understand how the algorithm splits the feature space at a branch, let us consider what a split is. A split consists of a feature $f$ and a splitting point $t$ which separates the features space into two regions i.e.
+
+$$
+R_l(f,t, R) = \{X \in R\vert X_f \leq t\}\quad\text{and}\quad R_r(f,t, R) = \{X \in R\vert X_f > t\},
+$$
+
+where $R_l$ is the left split and $R_r$ is the right split of the region $R$.
+Equality, i.e., $X_f=t$ can go to either side depending on implementation but will yield the same resulting training predictions. The initial region $R$ is just the feature space of $X$, i.e., the smallest closed set $R\subset \mathbb R^p$ such that $P(X\in R)=1$. The chosen split of a region $R$ is then the feature $f$ and splitting point $t$ that solves the minimization problem
+
+$$
+\underset{f,t}{\min}\left[\underset{a_l}\min\sum_{X\in R_l(f,t,R)}L(y_i,a_l)+\underset{a_r}\min\sum_{X\in R_r(f,t,R)}L(y_i,a_r)\right].
+$$
+
+We then build the tree by splitting $X$ into two regions. These regions are then used as the basis for the next split. We stop splitting according to some preset criteria, e.g., a max depth or a minimum number of observations in a leaf node (terminal region). If the trees are built with a small minimum number of observations or deep max depth criteria the final tree will almost be a binary search tree, i.e., the tree has remembered the training data instead of learned from it. To counter this over-fitting, the tree is *pruned*. Pruning is the act of cutting off branches to keep the tree's size and thereby complexity at a level that is reasonable for the data. There exist different pruning methods to keep the tree from over-fitting without losing important structures learned from data. When gradient boosting trees, we will grow trees to a specific depth and not prune, and we will not go deeper into details about pruning.
+
+### Gradient step
+As the name Gradient Boosting suggest, the boosting is done by taking a step in the steepest gradient descent direction. Since we are using the gradient of the loss function, we want a differentiable loss function. The loss that we suffer from our model w.r.t data is given by
+
+$$
+L(f)= \frac 1n\sum_{i=1}^nL(y_i,f(x_i)),
+$$
+
+Here $L(y,f(x))$ is typically squared
+$$
+(y-f(x))^2
+$$
+or absolute loss
+$$
+\vert y-f(x)\vert
+$$
+and $f$ is a sum of regression trees. 
+One interesting feature of boosting in the context of insurance data is to use a Poisson, Gamma, or Tweedie log-loss function. When using gradient descent to train a neural network, we calculate the gradient of the loss function with respect to the weights, since they were the parameters we wanted to update. In Gradient Boosting the "parameter", we want to update, is the function $f$. If we let $f_m = \sum_{i=0}^m T_i$ where $f_m,T_m\in \mathcal R^n$ with $f_m$ being the vector of predictions from $f$ as the $m$'th iteration. We can then calculate the entries of the gradient of the loss function w.r.t. to our  "parameter vector" $f=(f(x_1), f(x_2), \dots , f(x_n))$ 
+
+
+$$
+\frac{\partial L(f)}{\partial f(x_i)} = 
+\frac{\partial L(y_i,f(x_i))}{\partial f(x_i)}
+$$
+
+If we let 
+
+$$
+g_{i,m+1}= \frac{\partial L(f)}{\partial f(x_i)}\biggr\rvert_{f(x_i) = f_m(x_i)}
+$$
+
+where $g_{i,m+1}$ is the $i$'th gradient component evaluated at the $m$'th iteration.
+To update $f_m$, we train a new tree $T$ to the negative gradient. This will give us the steepest gradient descent within our framework. We could train other models which would give better performance on $g_{i,m+1}$, but since our goal is to generalize to new data, training a complex model iteratively would lead to over-fitting. The above approach is represented as:
+
+
+1. Initialize $f_0(x) = \arg\!\min_\gamma \sum_i=1^n L(y_i,\gamma)$
+2. For $j = 1$ to $m$ do:
+    1. For $i = 1$ to $n$ do:
+        1. Compute $e_{ij} = -g_{ij} = -\frac{\partial L(f)}{\partial f(x_i)}\biggr\rvert_{f(x_i) = f_m(x_i)}$
+    2. Train regression tree $T_j(x,\Theta_m)$ to the $e_{ij}$'s
+    3. Update $f_j(x)=f_{j-1}+T_j(x,\Theta_m)$
+3. Return $\hat f(x) = f_m(x)$
+
+#### Tree building and depth
+We briefly mentioned that fitting too complex models would cause the boosted model to over-fit. For boosting,  the regression tree building described in [Regression Trees] where a large tree is constructed and subsequently pruned, introduces some problems. We want to use weak learners, so exhaustively training a tree and then pruning to a weak learner increases computation time substantially. Instead, we build the trees with the same depth. This depth determines the level of interactions we want to include in our model. For example, using tree depth $D = 2$ is merely a univariate split of a feature and the resulting boosted model will not contain any interactions. Even though this seems like a simple model, boosting with $D = 2$ (also called "stumps") can achieve good results, and should be considered when doing the predictive analysis. Increasing depth increases the level of interaction, such that a tree with depth $D$ can model interactions of level $D-1$, but it is is not guaranteed, i.e., a tree of depth $D$ can make splits on a single feature, resulting in a univariate tree. Hastie et al., (2009), suggest that the choice of tree depth *"Should reflect the level of dominant interactions.."* and that in most cases a depth of 2, corresponding to one level of interaction, is sufficient and more than a depth of 10 will most likely not yield any lift in performance.
+
+Another method for limiting tree complexity is to limit the number of leaves $T$ instead of depth. By doing so, the tree is grown in a different way called Best First [@BestFirst]. This algorithm, in essence, takes all nodes into account when building the tree instead of only the current node. For example if we have a split into region $R_1$ and $R_2$ based on feature $x_1$ then the standard tree algorithm would consider a split for $R_1$ and a split for $R_2$ resulting in new regions $R_3,R_4$ and $R_5,R_6$ based on some features $x_{14}$ and $x_4$. The Best First algorithm instead compares the information gain for splitting the regions $R_1$ and $R_2$. Then it splits the region with best performance lift, resulting in new regions $R_5$ and $R_6$ based on $x_4$. It then compares the performance gain from splitting $R_1$ (which we already know from a prior split), $R_5$ and $R_6$ and then splits the region with best performance lift. Notice that the Best First algorithm **can** split the same way as the standard algorithm, but **only if** it is the best split.
+
+```{r bestfirst, fig.cap="Comparison of tree growing algorithms. \\textbf{Left}: Three splits by the standard algorithm. \\textbf{Right}: Three splits by Best First algorithm. We see how the Best First algorithm does not build layer by layer."}
+knitr::include_graphics("bestfirst.png")
+```
+
+Building full trees the two algorithms results in the same tree, but the building order will differ, i.e., the Best First will exhaust the best splits first whereas the standard algorithm builds the tree layer by layer. Since the Best First algorithm can also grow the trees grown by the standard algorithm, the Best First algorithm will always reduce training error better than the standard algorithm. With this in mind, we should be more careful not to over-fit when using Best First. On the other hand, using Best First will yield us better models (in the sense of training error) than the standard algorithm. The relationship between depth $D$ and the number of leaves $T$ is such that if we grow a tree to depth $D$, then it will contain $2^D$ leaves (terminal nodes).
+
+As the tree depth/number of leaves has a significant influence on complexity and model performance, one should not just pick one tree depth/number of leaves. Instead, one should treat it as a hyperparameter, and based on the comments above we will focus our tree depth search for $1\leq D \leq 10$, but with a low sample weight for deeper tree depth and similar for the number of leaves we will focus on $2 \leq T \leq 2^{10}$.
+
+### Regularization
+Since the gradient boosting algorithm is iteratively reducing the training error for each iteration, a large number of boosting iterations will lead to virtually zero error. This is, of course, an over-fitting issue and we address over-fitting in the boosting algorithm with different regularization techniques.
+
+#### Learning rate
+In the gradient boosting algorithm we can add a learning rate (or shrinkage rate as it is also called depending on literature). The learning rate in gradient boosting is similar to the learning rate in the gradient descent algorithms for neural networks where it scales the update of our output function. The gradient tree boosting algorithm then becomes
+
+1. Initialize $f_0(x) = \arg\!\min_\gamma \sum_i=1^n L(y_i,\gamma)$
+2. For $j = 1$ to $m$ do:
+    1. For $i = 1$ to $n$ do:
+        1. Compute $e_{ij} = -g_{ij} = -\frac{\partial L(f)}{\partial f(x_i)}\biggr\rvert_{f(x_i) = f_m(x_i)}$
+    2. Train regression tree $T_j(x,\Theta_m)$ to the $e_{ij}$'s
+    3. Update $f_j(x)=f_{j-1}+\eta T_j(x,\Theta_m)$
+3. Return $\hat f(x) = f_m(x)$
+
+Here $\eta \in (0,1]$, but Hastie et al., (2009) suggest small values ($\eta<0.1$) as it leads to better test performance, i.e., a model that generalizes well. When reducing the learning rate, we should increase the number of boosting iterations $m$ to accommodate for the reduced learning in each iteration, i.e., if we reduce the learning rate from $\eta$ to $\frac \eta2$, we expect to double the number of iterations to achieve the same model performance. When modeling data, the learning rate will be a hyperparameter to tune.
+
+#### Sampling
+Similar to the expansion of vanilla gradient descent for neural networks we can implement stochastic gradient boosting for boosting trees. At each iteration, we sample without replacement from our data and calculate the gradient with respect to that data. This reduces the computing time since we are training trees on less data, but can also improve performance substantially [@Friedman:2002:SGB:635939.635941]. Introducing sampling to the gradient boosting algorithm is called Stochastic Gradient Boosting.
+
+1. Initialize $f_0(x) = \arg\!\min_\gamma \sum_{i=1}^n L(y_i,\gamma)$
+2. For $j = 1$ to $m$ do:
+    1. Let $\pi$ be a random permutation of $\{1, 2, 3, \dots, n\}$
+    2. For $i = 1$ to $\tilde n$ do:
+        1. Compute $e_{\pi(i)j}=-g_{\pi(i)j}=-\frac{\partial L(f)}{\partial f(x_{\pi(i)})}\biggr\rvert_{f(x_{\pi(i)})=f_m(x_{\pi(i)})}$
+    3. Train regression tree $T_j(x,\Theta_m)$ to the $e_{\pi(i)j}$'s
+    4. Update $f_j(x)=f_{j-1}+\eta T_j(x,\Theta_m)$
+3. Return $\hat f(x) = f_m(x)$
+
+In addition to sampling training data, we can also sample the features similar to a random forest and is empirically shown to improve performance in some instances [@XGB]. The feature sampling is done on the iteration level, i.e., per tree.
+
+#### Regularized loss function
+The loss function itself can also be regularized to ensure that there is a balance between complexity and not over-fitting. Different implementations have different versions of the regularized loss function. The different penalties that are placed on the model, in the implementation of gradient boosting we will be using, are L2-regularization and number of leaves in a single tree. When using L2-regularization, we are shrinking the weights of the leaf, i.e., the predictions, towards zero. We can also penalize the number of leaves in a tree, which requires adding a term to the objective function. Though, setting a maximum number of leaves can also be used as a regularization method and can be used "out of the box" since it does not interfere with the estimation of weights, but rather how deep to build the tree. We will use L2-regularization and a maximum number of leaves as regularization methods when modeling the GMBs.
+
+#### Early stopping
+As with neural networks, we can also utilize the early stopping method.
+
+### Implementations
+There are two implementations of gradient boosting that have shown great potential in data science and machine learning competitions. XGBoost has a reputation for being the go-to package for winning competitions on Kaggle and the KDD Cup. Every top team in the 2015 KDD Cup competition used XGBoost in their solution [@kddcup], and just under 2/3 of the top 3 teams in Kaggle 2015 competitions used XGBoost. In 2017 Microsoft released a gradient boosting package called LightGBM, which has been gaining much traction and has also been used in some winning solutions in data science/machine learning competitions [@lightGBM]. Both implementations of gradient boosting focus on fast, efficient training with scalability for handling large dataset.
+
+#### Light-GBM
+LightGBM is an implementation that seeks to optimize the implementations of XGboost and other sophisticated implementations further. Especially improving scalability and efficiency when both dimensions of data are high.
+The place where the lightGBM algorithm is improving over other similar algorithms is its ability to make the splits using gain estimates instead of searching for the actual best split. It implements two methods to improve upon similar implementations to do this. These methods are Exclusive Feature Bundling and Gradient-based One-Side Sampling. The main idea behind both methods is reducing the dimensionality of the problem.
+The Exclusive Feature Bundling method groups features which are mutually exclusive to reduce the number of features. When many features are one-hot-encoded, this reduces the feature space significantly.
+The Gradient-based One-Side Sampling reduces the sample dimensionality of the problem by excluding a percentage of data with small gradients. Then only the rest of the data is used in the estimation of the information gain.
+These two methods combined reduce both dimensions of the data while keeping the samples with information.
+The creators of lightGBM have shown that the algorithm is training up to over 20 times faster without losing significant model performance.
+An insurance minded advantage of the lightGBM framework is that it already includes the Tweedie log-likelihood as a choice of objective function.
+
+
+## Meta ensemble methods
+In boosting, we introduced an ensemble model, where we trained a lot of weak learners which, when combined in an *ensemble*, made a strong learner. The basic idea of meta ensembling is the same - we have some base models, which we combine in a certain way to create a better model. 
+
+### Stacked generalization
+Stacked generalization is a meta-ensemble method introduced in Wolpert, (1992). The goal of stacked generalization is to create a model that generalizes better to new data, and does not simply learn to remember the training data. Stacked generalization or simply *stacking* works by first creating $m$ "level 0" learners, base learners, or *generalizers* as they are called in stacking. These generalizers are trained on a subset of training data, and predictions are made on another subset that is disjunct from the training subset. These predictions, together with any subset of features, are passed on as the "level 1" data. A level 1 learner is then trained on the level 1 data. Notice, that the level 1 data is independent of the level 0 generalizers, and the level 1 learner is correcting the mistakes the level 0 generalizers make when predicting on independent data. Wolpert (1992) suggested that the base learners/generalizers are as diverse as possible, i.e., covering as much of the model space as possible. If we for example only used (variations of) linear models, the resulting generalizers would have a high correlation, so the level 1 learner cannot increase the performance of the generalizer much. For example, if we have three generalizers which generalize well $80\%$ of the hold-out set, but because they are highly correlated the level 1 learner cannot learn more from the generalizers, since when one is "right" the others are "right" too and vice versa. In contrast, assume we have three models with a rather bad performance which only perform well on 1/3 of the hold-out data, but are completely uncorrelated, i.e., always one of the models is correct, while the two others are wrong. The level 1 learner will then be able to increase the performance substantially since it (hopefully) chooses one of the three generalizers which have good performance.
+
+The exact way we subset training data can vary but should be done within the following guidelines:
+
+Let $X$ be our training set. Then create a set of $r$ partitions by
+
+1. For $i = 1, \dots, r$
+    1. Split $X$ into $X_{i,1}$ and $X_{i,2}$
+
+then
+
+$$
+\{\{X_{1,1},X_{1,2}\},\dots,\{X_{r,1},X_{r,2}\}\}
+$$
+
+is our *partitioning set*.
+Here $X_{i,1}\cap X_{i,2} = \emptyset$ such that the level 1 data is independent of the level 0 generalizers, but $X_{i,1}\cup X_{i,2}$ does not have to be equal to $X$. One partitioning scheme is similar to $k$-fold cross-validation, where we split the data into $k$ folds/partitions $X_1,X_2,\dots,X_k$ and is called a cross-validation partitioning set CVPS^[Not same CVPS as in Wolpert (1992), but for $k=m$ they are the same]. Our partitioning set is then
+
+$$
+\{\{X_{1,1},X_{1,2}\},\dots,\{X_{r,1},X_{r,2}\}\} = \{\{X\setminus X_1,X_1\},\dots,\{X\setminus X_r,X_r\}\}
+$$
+
+Then for each of our base learners $i=1,\dots, m$ we loop over the folds, such that we hold-out the $i$'th partition and fit the level 0 learner and predict values for the hold-out partition.
+This scheme forwards all data to level 1, which mean we do not "loose" data along the way, but on the other hand, it can be quite computationally expensive. We suggest a less expensive scheme, for faster computation, which is called $k-fold$ cyclic partitioning (CP). It should be implemented such that split $X$ into $X_1, X_2,\dots, X_k$ and our partitioning set becomes
+
+$$
+\{\{X_1,X_2\},\{X_2,X_3\},\dots,\{X_r,X_1\}\}
+$$
+
+This scheme uses all data for modeling, and forwards all data for modeling, but only once, compared to $k-fold$ CVPS which uses data $k-1$ times in modeling.
+
+Let $f_j(\cdot\,,X_{i,1})$ be the $j$'th model trained on $X_{i,1}$. Then training the $m$ models takes place as follow 
+
+1. For $j=1,\dots, m$ do
+    1. For $i=1,\dots, r$ do
+        1. Train model $f_j(\dot,X_{i,1})$
+        2. Predict values $\hat Y_{i}$ as $f_j(X_{i,2},X_{i,1})$
+2. Create Level 1 data $X_1$ as the matrices $[X_{i,2} \vert \hat Y_1\vert\dots\vert\hat Y_m]$ stacked together.
+3. Train level 1 model on $X_1$
+
+
+The process outlined above is one layer of stacking and can be extended to the general case of $l$ layers of stacking such that the output data $X_1$ from level 0, becomes input data to a new layer of models with a partitioning set.
+
+How do you then predict values for new data? This is done by adding a  step 1.2 to the process above such that
+
+1. ...
+    2. Train model $f_j(\cdot\,,X')$
+
+Where $X'$ is a subset of $X$. In Wolpert, (1992), $X'=X$, but when it is not possible to train one of the models on the entirety of $X$, I suggest random sampling without replacement from $X$ to get $X'$.
+
+Then to score new data $A$, we do the following
+
+1. For $j=1,\dots, m$ do
+    1. Predict values $\hat Y_{i}$ as $f_j(A,X')$
+2. Create Level 1 data $A_1$ as the matrices $[A\vert \hat Y_1\vert\dots\vert\hat Y_m]$ stacked together.
+3. Predict final values with level 1 model
+
+This is the procedure we will use for testing a generalized stacking model.
+
+#### Cyclic time partitioning 
+In insurance, when pricing risk, we are always looking to predict using data that will appear in the future. For example, in our data, we have samples from the years 2013 through 2017. What we want to predict, are the risk premiums for the year 2018.  So what we want from our model is good out of time performance. To achieve this, we could use 2017 as test data, but as we argue in the section *[Data split reflections]*, this would remove the most relevant data from training. Instead, we want to create good out-of-time predictions with an in-time dataset.
+Using stacking we can create a model which will use this knowledge to create a partitioning scheme that will leverage this. 
+During stacking, we will use the previous two years to predict values for a given year. For years without two preceding years, we will not create a model, i.e., to predict values for 2014 we would need data from 2012 which we do not in our dataset.
+
+In general, if we have a dataset with a feature containing time stamp (could be a date, week, year), we will then create splits according to timestamp, such that we have $r$ ordered time periods. Let 
+
+$$
+\text{sample-period}(X_i)=\{\text{timestamps} \in X_i\},\; i=1,\dots,r.
+$$
+Then $\max(\text{sample-period}(X_i)) < \min(\text{sample-period}(X_j))$ for $i<j,\; i,j\in\{1,\dots,r\}$ and $X_i$ is the split belonging to the $i$'th time period. Given a training set length $l$, which controls how many periods use for training, the partitioning set is then
+
+$$
+\{\{X_{1}\cup\dots\cup X_{l},X_{l+1}\},\dots,\{X_{r-l-1}\cup\dots\cup X_{r-1},X_r\}\}.
+$$
+The reasoning behind this partitioning scheme is that our level 0 models creates out of time predictions. Our level 1 learner will then improve these out of time predictions. When training the level 1 learner, it is important to0 not include any features that contain information about the periods used to partition. If we did the level 1 learner would be able to correct all 2014 predictions equally, all 2015 equally, and so forth. We do not want this since the level 1 learner should be able to correct these out-of-time predictions regardless of which period they belong to.
+
+When we want to predict on new data what should $X'$ be? Since the level 1 learner has been trained to correct the out of time predictions of the models trained on $l$ periods of data, $X'$ should also be based on $l$ periods of data. This leads to 
+
+$$
+X'= \{X_{r-l},\dots,X_r\}.
+$$
+
+This leads to the question of how to test the performance of the stacked model. If the test set only contains one period, i.e., period $r+1$, then we do not need any considerations. If the test set contains multiple periods, we have to consider what implications the stacking scheme has on testing. For example if the test set contains periods $r$ and $r-1$, we should predict values for the level 1 learner's input data with models trained on $\{X_{r-l-1}\cup\dots\cup X_{r-1}\}$ and $\{X_{r-l}\cup\dots\cup X_{r}\}$. This allows the level 1 learner to correct one period into the future. If we use the model only trained on $X'$, we will not use the level 1 learner correct.
+
+When creating the periods one would typically choose splits such that each $\max(\text{period}(X_i)) - \min(\text{period}(X_i)),\; i=1,\dots,r$ are roughly equal across the splits.
+
+\newpage
